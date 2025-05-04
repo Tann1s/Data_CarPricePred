@@ -1,15 +1,20 @@
-This repository contains the code and related scripts for the project.
+# Craigslist Car Price Prediction
 
-**Note:**  
-The large data files required to fully run this project have not been uploaded to this repository.  
-Please contact me if you need access to the datasets or further details.
+This repository contains the code for a comprehensive analysis and prediction of used car prices using Craigslist data.
 
-## Contents
+## Project Overview
 
-- Source code and scripts
-- Documentation and notes (if any)
-- .gitignore excludes large data files
+- **Dataset:** ~420,000 Craigslist car/truck listings with attributes like price, condition, year, manufacturer, odometer, fuel type, etc.
+- **Data Cleaning:** Handling missing values, recoding categorical variables, creating dummy variables.
+- **Visualization:** Price comparisons across car types, fuel types, geographic locations, and more.
+- **Modeling:** Linear regression, decision trees, random forest, and XGBoost (best R² ≈ 0.86).
+- **Text Mining:** Analysis of car descriptions for keyword extraction and sentiment analysis.
+
+## Note
+
+Large data files are **NOT included** in this repository due to size constraints.  
+Please contact me if you need access to the data.
 
 ## Status
 
-Code available. Data files not included.
+Code available. Data files excluded.
