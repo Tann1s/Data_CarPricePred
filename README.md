@@ -18,3 +18,13 @@ Please contact me if you need access to the data.
 ## Status
 
 Code available. Data files excluded.
+
+---
+
+#### 🔒 Copyright & Usage Notice
+
+© Ziyi Song. All rights reserved.
+
+The code, documentation, and all associated content in this repository are the intellectual property of the author and may not be copied, redistributed, or used for commercial purposes without prior written consent.  
+This repository is shared publicly for educational and portfolio purposes only.  
+For any inquiries regarding usage, please contact the author directly.
