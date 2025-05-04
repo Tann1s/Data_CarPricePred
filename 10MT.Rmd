@@ -1,0 +1,455 @@
+---
+title: "Craglist car price prediction"
+author: "ZiyiSong"
+date: "2022-12-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+#loading packages
+library(caTools)
+library(ROCR)
+library(tidyverse)
+library(dplyr)
+library(randomForest)
+library(rpart)
+library(rpart.plot)
+library(tidyverse)
+library(patchwork)
+library(caTools)
+library(caret)
+library(pROC)
+library(tree)
+library(ggplot2)
+library(ggmap)
+library(rstudioapi)
+library(plotly)
+library(wordcloud)
+library(wordcloud2)
+library(tm)
+library(gganimate)
+library(fastDummies)
+library(xgboost)
+library(DiagrammeR)
+library(tidytext)
+library(tidyverse)
+library(topicmodels)
+library(stringr)
+library(gutenbergr)
+library(reshape2)
+library(textdata)
+library(usmap)
+library(Hmisc)
+library(corrplot)
+library(parallel)
+library(doParallel)
+library(lime)
+library(mlbench)
+library(e1071)
+```
+
+### Parallel computing enabled, please close all programs except R
+
+```{r}
+registerDoParallel(cores = detectCores()-2)
+```
+
+### 1. Data selection
+
+-   This data is scraped every few months, it contains most all relevant information that Craigslist provides on car sales including columns like price, condition, manufacturer, latitude/longitude, and 18 other categories.
+
+-   Its sample size is large enough to reflect the real market condition. It also contains various variables covering different status. Those variables can be converted into dummy variables or into levels. In our model, title status and transmission are converted into 1 and 0 levels while fuel types, vehicle types and drive train are converted into dummies.
+
+-   At the end we can use text mining for description column to see what Americans truly want.
+
+-   Data source: <https://www.kaggle.com/datasets/austinreese/craigslist-carstrucks-data>
+
+-   Size 1.25GB, contains approximately 420,000 rows
+
+-   Dataset along with submission will be the reduced size file.
+
+#### 1.1 Clean data
+
+-   Uncomment those line only if you downloaded the original data, otherwise use the reduced size data
+
+```{r}
+   #import original data
+#craglistall = read.csv("Craglist.csv")
+#craglistall[craglistall == ""] <- NA
+#craglistall <- drop_na(craglistall)
+#nrow(craglistall)
+
+   #export complete case data to csv, this will be the reduced size file for submission
+#write.csv(craglistall,"craglistall.csv", row.names = FALSE)
+
+   #import complete case data
+craglistcomplete = read.csv("craglistall.csv")
+   #recode cylinder and as.numeric for columns
+craglistcomplete$cylinders[craglistcomplete$cylinders == "other"] <- "0"
+craglistcomplete$cylinders <- as.numeric(gsub(" cylinders" ,"",craglistcomplete$cylinders))
+craglistcomplete <- craglistcomplete%>%mutate_at(c('price', 'year', 'odometer'), as.numeric)
+craglistcomplete$price[craglistcomplete$price <= 1000] <- NA
+craglistcomplete$price[craglistcomplete$price >= 100000] <- NA
+craglistcomplete$price[craglistcomplete$odometer >= 500000] <- NA
+craglistcomplete$transmission[craglistcomplete$transmission == "other"] <- NA
+craglistcomplete <- drop_na(craglistcomplete)
+names(craglistcomplete)
+```
+
+#### 1.2 Recode to levels
+
+```{r}
+#get condition levels, recode to condition score as follow, better contidion better score, 6 levels
+craglistcomplete$condition <-  as.integer(ifelse(craglistcomplete$condition == "new",6,ifelse(craglistcomplete$condition == "like new",5,ifelse(craglistcomplete$condition == "excellent",4,ifelse(craglistcomplete$condition == "good",3, ifelse(craglistcomplete$condition == "fair",2,ifelse(craglistcomplete$condition == "salvage",1,0)))))))
+
+#get size levels, larger size higher socore, 4 levels
+craglistcomplete$size <-  as.integer(ifelse(craglistcomplete$size == "full-size",4,ifelse(craglistcomplete$size == "mid-size",3, ifelse(craglistcomplete$size == "compact",2,ifelse(craglistcomplete$size == "sub-compact",1,0)))))
+```
+
+#### 1.3 Grouping, get dummies
+
+```{r}
+#recode title_status in to clean == 1 , others == 0 (not clean)
+craglistcomplete$title_status <-  as.integer(ifelse(craglistcomplete$title_status == "clean", 1, 0))
+
+#recode transmission in to auto == 1 , manual == 0
+craglistcomplete$transmission <-  as.integer(ifelse(craglistcomplete$transmission == "automatic", 1, 0))
+
+#get dummies for "fuel", "type", "drive"
+craglist.grp <- dummy_cols(craglistcomplete, select_columns=c("fuel", "type", "drive"), remove_selected_columns = TRUE)
+#head(craglist.grp)
+
+#there's column name that will cause trouble in random forest model
+colnames(craglist.grp)[26] <- "type_minivan"
+```
+
+### 2. Visualization
+
+-   Our primary goal is to see price comparisons among different variables. Besides the price, we also want to see how the used car market is. We would like to see the car types, fuel types, and different manufacturers’ comparison and price difference across cities
+
+#### 2.1 Price \~ type box plot
+
+```{r}
+plot21<-ggplot(craglistcomplete)+geom_boxplot(mapping =aes(x=type, y=price), fill = "#FFDB6D", color = "#C4961A")
+plot21
+```
+
+-   By comparing the box plots, Trucks, pickup and off-roads have the highest price. Sedan, wagon and mini van’s price are the lowest. We can see car size has a influence on the price. The larger the car size, the more expensive the price.
+
+#### 2.2 Price \~ fuel type plot
+
+```{r}
+Fuel_Price <- craglistcomplete %>% group_by(fuel) %>% summarise(avgprice = mean(price))
+```
+
+```{r}
+ggplot(data = Fuel_Price) + geom_bar(mapping = aes(x = fuel, y = avgprice), stat = "identity", fill = "#F59811")  + theme_light() + labs(x = "fuel type") + ggtitle("Avg price by fuel type") + theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+#### 2.3 Geographical comparison
+
+##### 2.3.1 State average price comparison
+
+```{r}
+#group by state and price
+group261 <- subset(craglistcomplete, select = c(state, price))
+#filtering for average
+state_plot <- group261 %>% group_by(state) %>% summarise(avgprice = mean(price)) 
+state_plot 
+
+plot_usmap(data = state_plot , values = "avgprice", color = "coral") + 
+  scale_fill_continuous(
+    low = "white", high = "red", name = "Average Price", label = scales::comma
+  ) + theme(legend.position = "right")
+```
+
+##### 2.3.2 City comparison
+
+```{r}
+#Google Map API access key
+register_google(key = "AIzaSyDuBhfsCMjhNKhxV2J1lkQjF3vTRO372tQ")
+```
+
+```{r message=FALSE}
+#Get pittsburgh map
+Pitt <- get_map(location = "Pittsburgh", zoom = 10, source="google", maptype = "roadmap")
+#Get columbus map
+Cbus <- get_map(location = "Columbus", zoom = 10, source="google", maptype = "roadmap")
+```
+
+```{r, warning = FALSE}
+PittMap <- ggmap(Pitt) + geom_point(aes(long, lat, color = drive), data = craglistcomplete) + ggtitle("Pittsburgh Drive Train") + xlab("Longitude") + ylab("Latitude") + theme(plot.title = element_text(hjust = 0.5))
+
+CbusMap <- ggmap(Cbus) + geom_point(aes(long, lat, color = drive), data = craglistcomplete) + ggtitle("Columbus Drive Train") + xlab("Longitude") + ylab("Latitude") + theme(plot.title = element_text(hjust = 0.5))
+
+PittMap; CbusMap
+```
+
+#### 2.4 Average Price comparison
+
+##### 2.4.1 Price \~ Year and type
+
+```{r}
+Fuel_Price <- craglistcomplete %>% group_by(type,year) %>% summarise_if(is.numeric, mean, na.rm=TRUE) %>% filter(year<=2020 & year>=2000)
+
+plot231 <- ggplot(data=Fuel_Price, aes(x=year, y = price, group=type, fill=type)) + geom_area(alpha=0.4 , size=0.5, colour="black")
+plot231
+ 
+```
+
+##### 2.4.2 Price \~ Year and odometer
+
+```{r warning=FALSE}
+sdf <- craglistcomplete %>% group_by(type,year,region) %>% summarise(count_n = n(),avgprice = mean(price), avgodometer = mean(odometer)) %>% filter(year>=1950)
+sdf
+
+plot232 <- ggplot(sdf %>% filter(year>=1950), aes(x = avgodometer, y = avgprice, color = type)) + geom_point(aes(size = count_n,frame = year)) + scale_x_log10() + ggtitle("Listed car price ~ Year and odometer") + theme(plot.title = element_text(hjust = 0.5))
+# Using frame = year, we specify the datapoints for each frame
+ggplotly(plot232)
+```
+
+##### 2.4.3 Price \~ Make
+
+```{r}
+#group by mfg and price
+group233 <- subset(craglistcomplete, select = c(manufacturer, price))
+#filtering for average
+mfg_plot <- group233 %>% group_by(manufacturer) %>% summarise(avgprice = mean(price)) 
+mfg_plot 
+plot233 <- ggplot(data = mfg_plot) + geom_bar(aes(x = manufacturer,  y = avgprice), show.legend = FALSE, stat = "identity", fill = "#79A5FF") + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Manufacturer's car Avg Price") + theme(plot.title = element_text(hjust = 0.5)) + coord_flip()
+plot233 
+```
+
+##### 2.4.4 Price \~ Drive Train
+
+```{r}
+#group by
+group234 <- subset(craglistcomplete, select = c(drive, price, region, transmission))
+#filtering for average
+drive_plot <- group234 %>% group_by(drive, region, transmission)%>% summarise(avgprice = mean(price)) %>% filter(region == "columbus" | region == "pittsburgh" | region == "cleveland" | region == "philadelphia" | region == "cincinnati" | region == "harrisburg")
+
+plot234 <- ggplot(data = drive_plot) + geom_bar(mapping = aes(x = region, y = avgprice, fill = transmission), stat = "identity") + facet_wrap(~drive) + theme_light() + labs(x = "Drive train across cities, 1 is automatic transmission") + ggtitle("Average price by drive train") + theme(plot.title = element_text(hjust = 0.5)) + theme(axis.text.x = element_text(angle = 90))
+plot234
+```
+
+### 3. Price prediction
+
+#### 3.1 Subset for prediction
+
+```{r}
+#Remove variables not needed for modeling
+craglist.sub <- subset(craglist.grp, select = -c(region, manufacturer, model, paint_color, description, state))
+```
+
+#### 3.2 Split data into train and test
+
+```{r}
+set.seed(114514, sample.kind = "Rejection")
+split = sample(nrow(craglist.sub),0.8*nrow(craglist.sub))
+train = craglist.sub[split,]
+test = craglist.sub[-split,]
+```
+
+#### 3.3 Linear model and performance
+
+##### 3.1.1 Correlation check
+
+```{r}
+M <- cor(train)
+corrplot(M, method = "color",  tl.cex = 0.7)
+```
+
+##### 3.1.2 Linear Model
+
+-   Observed diesel correlated with gas, fwd and sedan correlated with many things, remove them from linear model to comply with assumptions
+
+```{r}
+#Linear model
+lm <- lm(price ~ .- fuel_diesel - drive_fwd - type_sedan , data = train)
+summary(lm)
+```
+
+##### 3.1.3 Linear model performance in test data
+
+```{r warning=FALSE}
+test$predlm = predict(lm, newdata = test)
+train.mean = mean(train$price)
+SSElm = sum((test$predlm - test$price)^2)
+SSTlm = sum((train.mean - test$price)^2)
+MAElm = mean(abs(test$price - test$predlm))
+OSRlm = 1 - SSElm/SSTlm
+OSRlm
+MAElm
+```
+
+#### 3.4 Regression tree
+
+##### 3.4.1 Base tree
+
+```{r}
+set.seed(114514, sample.kind = "Rejection")
+basetree = rpart(price ~ ., data=train, method="anova",minbucket=50,cp=0.05)
+plotcp(basetree)
+rpart.plot(basetree, digits=-5, fallen.leaves = T)
+```
+
+##### 3.4.2 Adjust the tree
+
+```{r}
+#Adjust the cp and minibucket
+adjtree = rpart(price ~ ., data=train, method="anova",minbucket=5,cp=0.001)
+rpart.plot(basetree, digits=-5, fallen.leaves = T)
+```
+
+##### 3.4.3 Tree performance in test data
+
+```{r}
+test$predrt = predict(adjtree, newdata = test)
+SSErt = sum((test$predrt - test$price)^2)
+SSTrt = sum((train.mean - test$price)^2)
+MAErt = mean(abs(test$price - test$predrt))
+OSRrt = 1 - SSErt/SSTrt
+OSRrt
+MAErt
+```
+
+#### 3.5 Random forest
+
+##### 3.5.1 Random forest 300 trees
+
+```{r}
+set.seed(114514, sample.kind = "Rejection")
+baserf = randomForest(price~., data=train, ntree=300, nodesize=20, mtry=4)
+```
+
+##### 3.5.2 Plot and tune for mtry
+
+```{r}
+x = train[,-1]
+y = train$price
+set.seed(114514, sample.kind="Rejection")
+tuneRF(x, y, mtryStart = 4, stepFactor = 2, ntreeTry=300, nodesize=20, improve=0.01)
+```
+
+##### 3.5.3 Tuned Random Forest
+
+```{r}
+#Tuned rf
+rf.final = randomForest(price~., data = train, ntree=300, nodesize=20, mtry=16)
+varImpPlot(rf.final)
+```
+
+##### 3.5.4 Forest performance in test data
+
+```{r}
+test$predrf = predict(rf.final, newdata = test)
+SSErf = sum((test$predrf - test$price)^2)
+SSTrf = sum((train.mean - test$price)^2)
+MAErf = mean(abs(test$price - test$predrf))
+OSRrf = 1 - SSErf/SSTrf
+OSRrf
+MAErf
+```
+
+##### 3.5.5 Forest Interpertation
+
+-   Partial dependence plot
+
+```{r}
+par(mfrow=c(2,2))
+partialPlot(rf.final, test , condition)
+partialPlot(rf.final, test , cylinders)
+partialPlot(rf.final, test , year)
+partialPlot(rf.final, test , odometer)
+```
+
+#### 3.6 XGBoost
+
+-   What is XGBoost? An implementation of gradient boosted decision trees designed for speed and performance.
+-   Why we are using it? To boost model performance and check if there's a better fitment or prediction performance.
+
+##### 3.6.1 XGB model
+
+```{r warning=FALSE}
+set.seed(114514, sample.kind = "Rejection")
+ctrl <- trainControl(method = "repeatedcv", repeats = 5) 
+# Repeat 5 k-fold cross-validation
+xgb_ctrl <- train(price ~ ., data = train, method = "xgbTree",verbosity = 0, trControl = ctrl)
+#visualizing XGB
+xgb.plot.tree(model = xgb_ctrl$finalModel, trees = 1)
+```
+
+##### 3.6.2 XGB performance in test data
+
+```{r}
+test$predxgb = predict(xgb_ctrl, newdata = test)
+SSExgb = sum((test$predxgb - test$price)^2)
+SSTxgb = sum((train.mean - test$price)^2)
+MAExgb = mean(abs(test$price - test$predxgb))
+OSRxgb = 1 - SSExgb/SSTxgb
+OSRxgb
+MAExgb
+```
+
+### 4. Model comparision selection
+
+```{r}
+table <- matrix(c(MAElm, OSRlm, MAErt, OSRrt, MAErf, OSRrf, MAExgb, OSRxgb), ncol = 2, byrow = T)
+colnames(table) <- c('MAE', 'R-Square')
+rownames(table) <- c('Linear Model','Regression Tree','Random Forest','XGBoost')
+round(table, digits = 2)
+```
+
+-   Random forest is selected
+
+### 5. Text mining for description
+
+#### 5.1 Subset data for text mining
+
+```{r}
+craglist.text1 <- craglistcomplete$description
+craglist.text1 <- gsub('[\t\n]','',craglist.text1)
+craglist.text1 <- gsub('[^[:alnum:] ]','',craglist.text1)
+craglist.text1 <- gsub('[[:digit:]]', '', craglist.text1)
+Car_description <- data.frame(line = 1:nrow(craglistcomplete),as.character(craglist.text1))
+```
+
+```{r}
+Car_description$text <- Car_description$as.character.craglist.text1.
+Car_description$as.character.craglist.text1. <- NULL
+Car_description <- Car_description %>% unnest_tokens(word, text)
+```
+
+##### 5.1.1 Remove Stop Words
+
+```{r}
+Car_description <- Car_description %>% anti_join(stop_words, by = c(word = "word"))
+```
+
+#### 5.2 Wordcloud
+
+```{r}
+word_counts <- Car_description %>%
+  count(word, sort = TRUE) 
+#word_counts
+```
+
+```{r}
+wordcloud2(word_counts, color = "random-light", backgroundColor = "white")
+```
+
+#### 5.3 Sentiment analysis
+
+```{r warning=FALSE}
+Car_description %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  acast(word ~ sentiment, value.var = "n", fill = 0) %>% # acast(): Cast A Molten Data Frame Into An Array Or Data Frame.
+  comparison.cloud(colors = c("#F8766D", "#00BFC4"),
+                   max.words = 150)
+```
